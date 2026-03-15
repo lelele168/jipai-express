@@ -1,8 +1,12 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Toaster, toast } from 'sonner';
-import { Scan, History, Cloud, CloudOff, Plus, Trash2, RefreshCw, Camera, Search, BarChart3, Copy, Share2, X, QrCode, Wifi, WifiOff } from 'lucide-react';
+import { Scan, History, Cloud, CloudOff, Plus, Trash2, RefreshCw, Camera, Search, BarChart3, Copy, Share2, X, QrCode, Wifi, WifiOff, User, Settings } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import Scanner from './components/Scanner';
+import { AuthProvider, useAuth } from './lib/AuthContext';
+import Login from './pages/Login';
+import Register from './pages/Register';
+import Dashboard from './pages/Dashboard';
 import {
   ExpressRecord,
   identifyExpressCompany,
@@ -13,9 +17,13 @@ import {
   supabase,
 } from './lib/supabase';
 
-type TabType = 'scan' | 'history' | 'stats';
+type TabType = 'scan' | 'history' | 'stats' | 'dashboard';
+type ViewType = 'auth' | 'main';
 
-export default function App() {
+function AppContent() {
+  const { user, loading: authLoading } = useAuth();
+  const [view, setView] = useState<ViewType>('auth');
+  const [showLogin, setShowLogin] = useState(true);
   const [activeTab, setActiveTab] = useState<TabType>('scan');
   const [records, setRecords] = useState<ExpressRecord[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
@@ -25,18 +33,49 @@ export default function App() {
   const [searchKeyword, setSearchKeyword] = useState('');
   const [connectionStatus, setConnectionStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
 
-  // 加载本地记录
+  // 根据登录状态切换视图
+  useEffect(() => {
+    if (!authLoading) {
+      if (user) {
+        setView('main');
+        loadCloudRecords();
+      } else {
+        setView('auth');
+      }
+    }
+  }, [user, authLoading]);
+
+  // 从云端加载用户数据
+  const loadCloudRecords = async () => {
+    if (!user) return;
+    try {
+      const { data } = await supabase
+        .from('express_records')
+        .select('*')
+        .eq('user_id', user.id)
+        .order('scanned_at', { ascending: false });
+      if (data) {
+        setRecords(data);
+      }
+    } catch (error) {
+      console.error('加载云端记录失败:', error);
+    }
+  };
+
+  // 加载本地记录（未登录时使用）
   const loadRecords = useCallback(() => {
     const localRecords = getLocalRecords();
     setRecords(localRecords);
   }, []);
 
   useEffect(() => {
-    loadRecords();
-  }, [loadRecords]);
+    if (!user) {
+      loadRecords();
+    }
+  }, [user, loadRecords]);
 
   // 处理扫描成功
-  const handleScanSuccess = useCallback((decodedText: string) => {
+  const handleScanSuccess = useCallback(async (decodedText: string) => {
     const trimmed = decodedText.trim();
 
     // 验证格式
@@ -67,19 +106,33 @@ export default function App() {
     saveToLocalStorage(newRecord);
     setRecords(prev => [newRecord, ...prev]);
 
-    // 尝试同步到云端
-    syncToCloud(newRecord).then(success => {
-      if (success) {
-        setRecords(prev =>
-          prev.map(r =>
-            r.tracking_number === trimmed ? { ...r, synced: true } : r
-          )
-        );
+    // 同步到云端
+    if (user) {
+      try {
+        const { error } = await supabase
+          .from('express_records')
+          .insert([{
+            user_id: user.id,
+            tracking_number: trimmed,
+            express_company: company.name,
+            scanned_at: newRecord.scanned_at,
+            synced: true,
+          }]);
+
+        if (!error) {
+          setRecords(prev =>
+            prev.map(r =>
+              r.tracking_number === trimmed ? { ...r, synced: true } : r
+            )
+          );
+        }
+      } catch (error) {
+        console.error('同步失败:', error);
       }
-    });
+    }
 
     toast.success(`已扫描: ${company.name} - ${trimmed}`);
-  }, [records]);
+  }, [records, user]);
 
   // 处理手动输入
   const handleManualSubmit = () => {
@@ -92,17 +145,35 @@ export default function App() {
 
   // 同步所有未同步记录
   const syncAll = async () => {
+    if (!user) {
+      toast.error('请先登录');
+      return;
+    }
+
     setIsSyncing(true);
     const unsyncedRecords = records.filter(r => !r.synced);
 
     for (const record of unsyncedRecords) {
-      const success = await syncToCloud(record);
-      if (success) {
-        setRecords(prev =>
-          prev.map(r =>
-            r.tracking_number === record.tracking_number ? { ...r, synced: true } : r
-          )
-        );
+      try {
+        const { error } = await supabase
+          .from('express_records')
+          .insert([{
+            user_id: user.id,
+            tracking_number: record.tracking_number,
+            express_company: record.express_company,
+            scanned_at: record.scanned_at,
+            synced: true,
+          }]);
+
+        if (!error) {
+          setRecords(prev =>
+            prev.map(r =>
+              r.tracking_number === record.tracking_number ? { ...r, synced: true } : r
+            )
+          );
+        }
+      } catch (error) {
+        console.error('同步失败:', error);
       }
     }
 
@@ -138,7 +209,13 @@ export default function App() {
   };
 
   // 删除单条记录
-  const deleteRecord = (trackingNumber: string) => {
+  const deleteRecord = async (recordId: string, trackingNumber: string) => {
+    if (user && recordId) {
+      // 删除云端记录
+      await supabase.from('express_records').delete().eq('id', recordId);
+    }
+
+    // 删除本地记录
     const updated = records.filter(r => r.tracking_number !== trackingNumber);
     localStorage.setItem('jipai_express_records', JSON.stringify(updated));
     setRecords(updated);
@@ -146,12 +223,18 @@ export default function App() {
   };
 
   // 一键清空
-  const clearAll = () => {
-    if (confirm('确定要清空所有记录吗？此操作不可恢复！')) {
-      localStorage.removeItem('jipai_express_records');
-      setRecords([]);
-      toast.info('已清空所有记录');
+  const clearAll = async () => {
+    if (!confirm('确定要清空所有记录吗？此操作不可恢复！')) return;
+
+    if (user) {
+      // 清空云端记录
+      await supabase.from('express_records').delete().eq('user_id', user.id);
     }
+
+    // 清空本地记录
+    localStorage.removeItem('jipai_express_records');
+    setRecords([]);
+    toast.info('已清空所有记录');
   };
 
   // 复制单条记录
@@ -167,7 +250,6 @@ export default function App() {
       return;
     }
 
-    // 准备导出数据
     const exportData = records.map(r => ({
       '快递单号': r.tracking_number,
       '快递公司': r.express_company,
@@ -175,23 +257,18 @@ export default function App() {
       '同步状态': r.synced ? '已同步' : '未同步'
     }));
 
-    // 创建工作簿和工作表
     const worksheet = XLSX.utils.json_to_sheet(exportData);
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, '快递记录');
 
-    // 设置列宽
     worksheet['!cols'] = [
-      { wch: 20 }, // 快递单号
-      { wch: 10 }, // 快递公司
-      { wch: 18 }, // 扫描时间
-      { wch: 10 }  // 同步状态
+      { wch: 20 },
+      { wch: 10 },
+      { wch: 18 },
+      { wch: 10 }
     ];
 
-    // 生成文件名
     const fileName = `集派快递记录_${new Date().toISOString().split('T')[0]}.xlsx`;
-
-    // 导出文件
     XLSX.writeFile(workbook, fileName);
     toast.success(`已导出 ${records.length} 条记录`);
   };
@@ -231,6 +308,48 @@ export default function App() {
   const syncedCount = records.filter(r => r.synced).length;
   const totalCount = records.length;
 
+  // 渲染认证页面
+  if (view === 'auth' || authLoading) {
+    if (authLoading) {
+      return (
+        <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+          <div className="text-center">
+            <div className="w-12 h-12 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto"></div>
+            <p className="text-gray-500 mt-4">加载中...</p>
+          </div>
+        </div>
+      );
+    }
+
+    return showLogin ? (
+      <Login
+        onSwitchToRegister={() => setShowLogin(false)}
+        onLoginSuccess={() => {
+          setView('main');
+          loadCloudRecords();
+        }}
+      />
+    ) : (
+      <Register
+        onSwitchToLogin={() => setShowLogin(true)}
+        onRegisterSuccess={() => {
+          toast.success('注册成功，请登录');
+          setShowLogin(true);
+        }}
+      />
+    );
+  }
+
+  // 渲染数据管理后台
+  if (activeTab === 'dashboard') {
+    return (
+      <Dashboard
+        onBack={() => setActiveTab('scan')}
+      />
+    );
+  }
+
+  // 渲染主应用
   return (
     <div className="min-h-screen bg-gray-50">
       <Toaster position="top-center" />
@@ -242,38 +361,47 @@ export default function App() {
             <QrCode className="w-6 h-6" />
             集派快递
           </h1>
-          <button
-            onClick={testConnection}
-            disabled={connectionStatus === 'testing'}
-            className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg transition-all ${
-              connectionStatus === 'success' ? 'bg-green-500 text-white' :
-              connectionStatus === 'error' ? 'bg-red-500 text-white' :
-              connectionStatus === 'testing' ? 'bg-yellow-500 text-white animate-pulse' :
-              'hover:bg-blue-700'
-            }`}
-          >
-            {connectionStatus === 'success' ? (
-              <>
-                <Wifi className="w-4 h-4" />
-                已连接
-              </>
-            ) : connectionStatus === 'error' ? (
-              <>
-                <WifiOff className="w-4 h-4" />
-                连接失败
-              </>
-            ) : connectionStatus === 'testing' ? (
-              <>
-                <RefreshCw className="w-4 h-4 animate-spin" />
-                测试中
-              </>
-            ) : (
-              <>
-                <Cloud className="w-4 h-4" />
-                {syncedCount === totalCount && totalCount > 0 ? '已同步' : `${syncedCount}/${totalCount}`}
-              </>
-            )}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setActiveTab('dashboard')}
+              className="flex items-center gap-1 text-sm px-3 py-1.5 hover:bg-blue-700 rounded-lg"
+              title="数据管理后台"
+            >
+              <Settings className="w-4 h-4" />
+            </button>
+            <button
+              onClick={testConnection}
+              disabled={connectionStatus === 'testing'}
+              className={`flex items-center gap-2 text-sm px-3 py-1.5 rounded-lg transition-all ${
+                connectionStatus === 'success' ? 'bg-green-500 text-white' :
+                connectionStatus === 'error' ? 'bg-red-500 text-white' :
+                connectionStatus === 'testing' ? 'bg-yellow-500 text-white animate-pulse' :
+                'hover:bg-blue-700'
+              }`}
+            >
+              {connectionStatus === 'success' ? (
+                <>
+                  <Wifi className="w-4 h-4" />
+                  已连接
+                </>
+              ) : connectionStatus === 'error' ? (
+                <>
+                  <WifiOff className="w-4 h-4" />
+                  连接失败
+                </>
+              ) : connectionStatus === 'testing' ? (
+                <>
+                  <RefreshCw className="w-4 h-4 animate-spin" />
+                  测试中
+                </>
+              ) : (
+                <>
+                  <Cloud className="w-4 h-4" />
+                  {syncedCount === totalCount && totalCount > 0 ? '已同步' : `${syncedCount}/${totalCount}`}
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -471,7 +599,7 @@ export default function App() {
                           <Copy className="w-5 h-5" />
                         </button>
                         <button
-                          onClick={() => deleteRecord(record.tracking_number)}
+                          onClick={() => deleteRecord(record.id || '', record.tracking_number)}
                           className="p-2 text-gray-400 hover:text-red-500 transition-colors"
                           title="删除"
                         >
@@ -587,5 +715,13 @@ export default function App() {
         </div>
       </nav>
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }

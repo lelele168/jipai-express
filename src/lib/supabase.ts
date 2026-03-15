@@ -5,9 +5,20 @@ const supabaseAnonKey = 'sb_publishable_4W7AsPmD1dkVsKu15PiG2A__Gn4BZSy';
 
 export const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
+// 用户类型
+export interface User {
+  id: string;
+  email: string;
+  username?: string;
+  full_name?: string;
+  avatar_url?: string;
+  role?: string;
+}
+
 // 快递单号类型
 export interface ExpressRecord {
-  id?: number;
+  id?: string;
+  user_id?: string;
   tracking_number: string;
   express_company: string;
   scanned_at: string;
@@ -82,12 +93,13 @@ export function clearLocalRecords(): void {
   localStorage.removeItem('jipai_express_records');
 }
 
-// 同步到云端
-export async function syncToCloud(record: ExpressRecord): Promise<boolean> {
+// 同步到云端（带用户ID）
+export async function syncToCloud(record: ExpressRecord, userId: string): Promise<boolean> {
   try {
     const { error } = await supabase
       .from('express_records')
       .insert([{
+        user_id: userId,
         tracking_number: record.tracking_number,
         express_company: record.express_company,
         scanned_at: record.scanned_at,
@@ -103,12 +115,13 @@ export async function syncToCloud(record: ExpressRecord): Promise<boolean> {
   }
 }
 
-// 从云端获取记录
-export async function fetchCloudRecords(): Promise<ExpressRecord[]> {
+// 从云端获取当前用户的记录
+export async function fetchCloudRecords(userId: string): Promise<ExpressRecord[]> {
   try {
     const { data, error } = await supabase
       .from('express_records')
       .select('*')
+      .eq('user_id', userId)
       .order('scanned_at', { ascending: false });
 
     if (error) throw error;
@@ -116,5 +129,61 @@ export async function fetchCloudRecords(): Promise<ExpressRecord[]> {
   } catch (error) {
     console.error('获取云端记录失败:', error);
     return [];
+  }
+}
+
+// 删除云端记录
+export async function deleteCloudRecord(recordId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('express_records')
+      .delete()
+      .eq('id', recordId);
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('删除记录失败:', error);
+    return false;
+  }
+}
+
+// 清空用户所有云端记录
+export async function clearCloudRecords(userId: string): Promise<boolean> {
+  try {
+    const { error } = await supabase
+      .from('express_records')
+      .delete()
+      .eq('user_id', userId);
+
+    if (error) throw error;
+    return true;
+  } catch (error) {
+    console.error('清空记录失败:', error);
+    return false;
+  }
+}
+
+// 获取所有用户的统计数据（管理员用）
+export async function fetchAllStats(): Promise<{ total: number; users: number; companies: Record<string, number> }> {
+  try {
+    const { data, error } = await supabase
+      .from('express_records')
+      .select('user_id, express_company');
+
+    if (error) throw error;
+
+    const total = data?.length || 0;
+    const uniqueUsers = new Set(data?.map(r => r.user_id)).size;
+    const companies: Record<string, number> = {};
+
+    data?.forEach(r => {
+      companies[r.express_company] = (companies[r.express_company] || 0) + 1;
+    });
+
+    return { total, users: uniqueUsers, companies };
+  } catch (error) {
+    console.error('获取统计失败:', error);
+    return { total: 0, users: 0, companies: {} };
   }
 }
