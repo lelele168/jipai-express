@@ -25,11 +25,14 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          # 注意：cache 参数已被移除，现在不会启用缓存，也不再检查锁文件
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 8  # 可根据项目需要调整版本号，例如 8.15、latest
+          run_install: false
 
+      # 注意：原 Install dependencies 步骤已被移除，因为 build 脚本内已包含 pnpm install
       - name: Build
         run: npm run build
 
