@@ -25,7 +25,7 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '18'
-          cache: 'false'
+          # 注意：cache 参数已被移除，现在不会启用缓存，也不再检查锁文件
 
       - name: Install dependencies
         run: npm install
